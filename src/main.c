@@ -60,17 +60,19 @@ static void print_ram_usage(void) {
 // --- Configuration ---
 
 // -- Streamer Pins --
-#define REPLAY_TX_PIN 15
-#define BGE_PIN 2
-#define STBN_PIN 3
+// #define BGE_PIN 2
+// #define STBN_PIN 3
 
-#define TXD_TO_ECU_PIN 4
-#define TXEN_TO_ECU_PIN 5
+#define TXD_TO_ECU_PIN 5
 #define RXD_FROM_ECU_PIN 6
+#define TXEN_TO_ECU_PIN 7
 
-#define TXD_TO_VEHICLE_PIN 28
-#define TXEN_TO_VEHICLE_PIN 27
-#define RXD_FROM_VEHICLE_PIN 26
+#define TXD_TO_VEHICLE_PIN 8
+#define RXD_FROM_VEHICLE_PIN 9
+#define TXEN_TO_VEHICLE_PIN 10
+
+// #define REPLAY_TX_PIN 11
+#define ISR_PIN 12
 
 // Forward declaration for the Core 1 counter
 extern volatile uint32_t core1_sent_frame_count;
@@ -78,9 +80,9 @@ extern volatile uint32_t core1_sent_frame_count;
 
 void print_pin_assignments(void)
 {
-    printf("Test Data Output Pin: %02d\n", REPLAY_TX_PIN);
-    printf("BGE Pin: %02d\n", BGE_PIN);
-    printf("STBN Pin: %02d\n", STBN_PIN);
+    // printf("Test Data Output Pin: %02d\n", REPLAY_TX_PIN);
+    // printf("BGE Pin: %02d\n", BGE_PIN);
+    // printf("STBN Pin: %02d\n", STBN_PIN);
     printf("ECU Transceiver Pins: RXD=%02d, TXD=%02d, TXEN=%02d\n", RXD_FROM_ECU_PIN, TXD_TO_ECU_PIN, TXEN_TO_ECU_PIN);
     printf("VEH Transceiver Pins: RXD=%02d, TXD=%02d, TXEN=%02d\n", RXD_FROM_VEHICLE_PIN, TXD_TO_VEHICLE_PIN, TXEN_TO_VEHICLE_PIN);
 }
@@ -129,13 +131,13 @@ void core1_entry(void)
 void setup_pins(void)
 {
     // disable transceiver
-    gpio_init(BGE_PIN);
-    gpio_set_dir(BGE_PIN, GPIO_OUT);
-    gpio_put(BGE_PIN, 0);
+    // gpio_init(BGE_PIN);
+    // gpio_set_dir(BGE_PIN, GPIO_OUT);
+    // gpio_put(BGE_PIN, 0);
 
-    gpio_init(STBN_PIN);
-    gpio_set_dir(STBN_PIN, GPIO_OUT);
-    gpio_put(STBN_PIN, 0);
+    // gpio_init(STBN_PIN);
+    // gpio_set_dir(STBN_PIN, GPIO_OUT);
+    // gpio_put(STBN_PIN, 0);
 
     gpio_pull_up(TXEN_TO_ECU_PIN);
     gpio_pull_up(TXEN_TO_VEHICLE_PIN);
@@ -151,13 +153,13 @@ void setup_pins(void)
     sleep_ms(100);
 
     // enable transceiver
-    gpio_put(BGE_PIN, 1);
-    gpio_put(STBN_PIN, 1);
+    // gpio_put(BGE_PIN, 1);
+    // gpio_put(STBN_PIN, 1);
 
     // Debug profiling pin: GPIO7 low = idle, high = ISR processing
-    gpio_init(7);
-    gpio_set_dir(7, GPIO_OUT);
-    gpio_put(7, 0);
+    gpio_init(ISR_PIN);
+    gpio_set_dir(ISR_PIN, GPIO_OUT);
+    gpio_put(ISR_PIN, 0);
 }
 
 int main(void)
@@ -188,7 +190,7 @@ int main(void)
     printf("Actual system clock: %lu Hz\n", clock_get_hz(clk_sys));
     printf("\n--- FlexRay Continuous Streaming Bridge (Forwarder Mode) ---\n");
 
-    setup_replay(pio1, REPLAY_TX_PIN);
+    // setup_replay(pio1, REPLAY_TX_PIN);
 
     multicore_launch_core1(core1_entry);
     sleep_ms(500);

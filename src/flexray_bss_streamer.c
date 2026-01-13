@@ -114,7 +114,7 @@ uint32_t notify_queue_dropped(void)
 void __time_critical_func(streamer_irq0_handler)(void)
 {
     // GPIO7 high indicates ISR processing; use direct SIO for minimal overhead
-    sio_hw->gpio_set = (1u << 7);
+    sio_hw->gpio_set = (1u << 12); // ISR_PIN
     uint32_t start_idx = 0;
 
     irq_handler_call_count++;
@@ -185,7 +185,7 @@ void __time_critical_func(streamer_irq0_handler)(void)
     uint32_t encoded = notify_encode(is_vehicle, ((irq_counter++) & 0x7FFFF), idx);
     (void)notify_queue_push(encoded);
     // Set GPIO7 low to indicate ISR exit (idle)
-    sio_hw->gpio_clr = (1u << 7);
+    sio_hw->gpio_clr = (1u << 12); // ISR_PIN
 }
 
 void setup_stream(PIO pio,
