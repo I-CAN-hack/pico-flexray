@@ -1,0 +1,16 @@
+[project]
+name = "pico-flexray"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "opendbc>=0.2.1",
+    "pandacan",
+    "pyusb>=1.3.1",
+]
+
+[tool.uv.sources]
+pandacan = { git = "https://github.com/commaai/panda.git", rev = "b4773f96b38a56089b28bf70b8073a9ddce6d847" }
+
+
