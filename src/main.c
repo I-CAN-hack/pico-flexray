@@ -73,6 +73,7 @@ static void print_ram_usage(void) {
 
 // #define REPLAY_TX_PIN 11
 #define ISR_PIN 12
+#define RELAY_PIN 15
 
 // Forward declaration for the Core 1 counter
 extern volatile uint32_t core1_sent_frame_count;
@@ -160,6 +161,12 @@ void setup_pins(void)
     gpio_init(ISR_PIN);
     gpio_set_dir(ISR_PIN, GPIO_OUT);
     gpio_put(ISR_PIN, 0);
+
+    // Relay pin: PIO checks this directly via "wait 1 gpio 15"
+    // When low, transmission is blocked; when high, transmission allowed
+    gpio_init(RELAY_PIN);
+    gpio_set_dir(RELAY_PIN, GPIO_IN);
+    gpio_pull_up(RELAY_PIN);
 }
 
 int main(void)

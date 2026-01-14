@@ -254,6 +254,9 @@ void setup_stream(PIO pio,
     irq_set_exclusive_handler(pio_get_irq_num(pio, 0), streamer_irq0_handler);
     irq_set_enabled(pio_get_irq_num(pio, 0), true);
 
+    pio_interrupt_clear(pio, 0);  // SM0's private flag
+    pio_interrupt_clear(pio, 1);  // SM1's private flag
+    pio_interrupt_clear(pio, 2);  // Unused (SM1 waits on this, must be clear)
     pio_interrupt_clear(pio, 3);
     pio_interrupt_clear(pio, 7);
     pio_sm_set_enabled(pio, sm_from_ecu, true);
