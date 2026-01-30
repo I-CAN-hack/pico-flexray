@@ -63,13 +63,13 @@ static void print_ram_usage(void) {
 // #define BGE_PIN 2
 // #define STBN_PIN 3
 
-#define TXD_TO_ECU_PIN 5
-#define RXD_FROM_ECU_PIN 6
-#define TXEN_TO_ECU_PIN 7
+#define TXD_TO_ECU_PIN 8
+#define RXD_FROM_ECU_PIN 9
+#define TXEN_TO_ECU_PIN 10
 
-#define TXD_TO_VEHICLE_PIN 8
-#define RXD_FROM_VEHICLE_PIN 9
-#define TXEN_TO_VEHICLE_PIN 10
+#define TXD_TO_VEHICLE_PIN 5
+#define RXD_FROM_VEHICLE_PIN 6
+#define TXEN_TO_VEHICLE_PIN 7
 
 // #define REPLAY_TX_PIN 11
 #define ISR_PIN 12
