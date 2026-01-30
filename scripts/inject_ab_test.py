@@ -26,15 +26,22 @@ EP_VENDOR_IN = 0x81
 
 
 def find_device():
-    dev = usb.core.find(idVendor=PANDA_VID, idProduct=PANDA_PID)
-    if dev is None:
-        return None
-    try:
-        if hasattr(dev, "set_configuration"):
-            dev.set_configuration()  # type: ignore[attr-defined]
-    except Exception:
-        pass
-    return dev
+    devs = usb.core.find(idVendor=PANDA_VID, idProduct=PANDA_PID, find_all=True)
+
+    for dev in devs:
+        serial = usb.util.get_string(dev, dev.iSerialNumber)
+
+        if not serial.startswith('picoflex'):
+            continue
+
+        try:
+            if hasattr(dev, "set_configuration"):
+                dev.set_configuration()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return dev
+
+    return None
 
 
 def build_override_payload(frame_id: int, base: int, data_bytes: bytes) -> bytes:
@@ -49,7 +56,7 @@ def build_override_payload(frame_id: int, base: int, data_bytes: bytes) -> bytes
     return header + data_bytes
 
 # Initialize CANPacker with local DBC path
-_DBC_PATH = os.path.join(os.path.dirname(__file__), "dbc", "lateral.dbc")
+_DBC_PATH = os.path.join(os.path.dirname(__file__), "..", "dbc", "lateral.dbc")
 _PACKER = CANPacker(_DBC_PATH)
 _DBC = _PACKER.dbc
 

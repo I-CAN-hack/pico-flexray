@@ -3,10 +3,11 @@ name = "pico-flexray"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">= 3.11, < 3.13"
 dependencies = [
     "opendbc>=0.2.1",
     "pandacan",
+    "pysub>=0.2",
     "pyusb>=1.3.1",
 ]
 
