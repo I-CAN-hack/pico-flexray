@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-import sys
-import struct
-import time
 import math
-import threading
-import queue
 import os
-from opendbc.can.parser import CANParser
+import queue
+import struct
+import sys
+import threading
+import time
+
 from opendbc.can.packer import CANPacker
+from opendbc.can.parser import CANParser
 
 try:
     import usb.core  # type: ignore
@@ -31,7 +32,7 @@ def find_device():
     for dev in devs:
         serial = usb.util.get_string(dev, dev.iSerialNumber)
 
-        if not serial.startswith('picoflex'):
+        if not serial.startswith("picoflex"):
             continue
 
         try:
@@ -52,8 +53,9 @@ def build_override_payload(frame_id: int, base: int, data_bytes: bytes) -> bytes
     if len(data_bytes) > 0xFFFF:
         raise ValueError("data too long")
     # op 0x90: [0x90][u16 id][u8 base][u16 len][len bytes]
-    header = struct.pack('<BHBH', 0x90, frame_id, base, len(data_bytes))
+    header = struct.pack("<BHBH", 0x90, frame_id, base, len(data_bytes))
     return header + data_bytes
+
 
 # Initialize CANPacker with local DBC path
 _DBC_PATH = os.path.join(os.path.dirname(__file__), "..", "dbc", "lateral.dbc")
@@ -70,14 +72,14 @@ ACC_DEFAULTS = {
     "steer_torque_req": 0.0,
     "TJA_ready": 0,
     "assist_mode": 0,
-    "wayback_en1_lane_keeping_trigger": 0,
+    "wayback_en1_lane_keeping_trigger": 31,
     "lane_keeping_triggered": 0,
-    "like_assist_torque_reserve": 0xA0,
-    "constants": 0x03ff17fe,
-    "wayback_en_2": 0,
+    "like_assist_torque_reserve": 200,
+    "constants": 0x03FF17FE,
+    "wayback_en_2": 1,
     "steering_engaged": 2,
-    "maybe_assist_force_enhance": 0xa2,
-    "maybe_assist_force_weaken": 0xfa,
+    "maybe_assist_force_enhance": 250,
+    "maybe_assist_force_weaken": 250,
 }
 
 #          B8 61 FC 7F 02 01 00 AO FE 17 FF 23 A2 FA
@@ -96,6 +98,7 @@ def pack_acc_payload(values: dict):
     msg = _PACKER.make_can_msg("ACC", 0, merged)
     return msg
 
+
 def crc8_checksum(data: bytes, init_value: int) -> int:
     """
     Compute CRC-8 using polynomial 0x1D (MSB-first), no final XOR.
@@ -111,15 +114,15 @@ def crc8_checksum(data: bytes, init_value: int) -> int:
                 crc = (crc << 1) & 0xFF
     return crc
 
-def build_frame(angle_deg: float, torque_nm: float) -> bytes:
-    values = {"steering_angle_req": angle_deg, "steer_torque_req": torque_nm}
+
+def build_frame(angle_deg: float) -> bytes:
+    values = {"steering_angle_req": angle_deg}
     data = pack_acc_payload(values)[1]
-    crc = crc8_checksum(data[1:], 0xf1)
+    crc = crc8_checksum(data[1:], 0xF1)
     data = bytearray(data)
     data[0] = crc
     return data
 
-print(build_frame(30, 0.2).hex())
 
 class KeyInput(threading.Thread):
     def __init__(self):
@@ -145,6 +148,7 @@ class KeyInput(threading.Thread):
 
 class DataMonitor(threading.Thread):
     """Reads from IN endpoint to detect whether bus data is flowing. Sets paused if silent."""
+
     def __init__(self, dev: "usb.core.Device", silence_timeout_s: float = 0.7):
         super().__init__(daemon=True)
         self.dev = dev
@@ -187,10 +191,8 @@ def print_help():
 def main() -> int:
     # Initial params
     mode = "A"  # A: angle-only, T: torque-only
-    angle_amp = 100.0  # deg peak for triangle wave
-    torque_amp = 0.2  # Nm amplitude for torque-only mode
-    MAX_TORQUE = 0.3  # Absolute safety clamp in Nm
-    half_period_s = 3.0
+    angle_amp = 90.0  # deg peak for triangle wave
+    half_period_s = 1.0
 
     print("FlexRay A/B injection (Angle vs Torque)")
     print("=====================================")
@@ -198,7 +200,10 @@ def main() -> int:
 
     dev = find_device()
     if dev is None:
-        print("Device not found. Is the Pico connected and running the app?", file=sys.stderr)
+        print(
+            "Device not found. Is the Pico connected and running the app?",
+            file=sys.stderr,
+        )
         return 1
 
     key_thread = KeyInput()
@@ -208,56 +213,48 @@ def main() -> int:
     monitor.start()
 
     start_time = time.time()
-    last_print = 0.0
     send_count = 0
     last_second = int(time.time())
     sends_in_second = 0
 
+    angle_cmd = 0
+
+    its = 0
+
     try:
         while True:
+            its += 1
             # Handle keys
             ch = key_thread.get_nowait()
             if ch:
-                if ch == 'q':
+                if ch == "q":
                     break
-                elif ch == 'a':
+                elif ch == "a":
                     mode = "A"
-                elif ch == 't':
-                    mode = "T"
-                elif ch == '+':
-                    if mode == 'A':
-                        angle_amp = min(45.0, angle_amp + 1.0)
-                    else:
-                        torque_amp = min(MAX_TORQUE, torque_amp + 0.05)
-                elif ch == '-':
-                    if mode == 'A':
-                        angle_amp = max(1.0, angle_amp - 1.0)
-                    else:
-                        torque_amp = max(0.0, torque_amp - 0.05)
-                elif ch == 'f':
+                elif ch == "+":
+                    angle_amp = min(45.0, angle_amp + 1.0)
+                elif ch == "-":
+                    angle_amp = max(1.0, angle_amp - 1.0)
+                elif ch == "f":
                     half_period_s = max(0.5, half_period_s * 0.8)
-                elif ch == 's':
+                elif ch == "s":
                     half_period_s = min(10.0, half_period_s * 1.25)
 
             # Generate setpoints
-            t_rel = (time.time() - start_time) % (2 * half_period_s)
-            if t_rel < half_period_s:
-                angle_cmd = -angle_amp + (2 * angle_amp) * (t_rel / half_period_s)
-            else:
-                angle_cmd = angle_amp - (2 * angle_amp) * ((t_rel - half_period_s) / half_period_s)
+            # t_rel = (time.time() - start_time) % (2 * half_period_s)
+            # if t_rel < half_period_s:
+            #     angle_cmd = -angle_amp + (2 * angle_amp) * (t_rel / half_period_s)
+            # else:
+            #     angle_cmd = angle_amp - (2 * angle_amp) * (
+            #         (t_rel - half_period_s) / half_period_s
+            #     )
 
-            if mode == 'A':
-                torque_cmd = 0.0
-            else:
-                # In torque-only mode, hold small angle (0) and modulate torque as a slow sine
-                torque_cmd = torque_amp * math.sin(2 * math.pi * (time.time() - start_time) / (2 * half_period_s))
-                angle_cmd = 0.0
-
-            # Safety clamp torque to ±MAX_TORQUE
-            if torque_cmd > MAX_TORQUE:
-                torque_cmd = MAX_TORQUE
-            elif torque_cmd < -MAX_TORQUE:
-                torque_cmd = -MAX_TORQUE
+            # angle_cmd = 90
+            #
+            cmd = (its // 100) % 2
+            angle_cmd = 360 if cmd else -360
+            #
+            # angle_cmd = min(its, 360 + 45)
 
             # Pause injection if no bus data is observed recently
             if monitor.should_pause():
@@ -265,9 +262,9 @@ def main() -> int:
                 time.sleep(0.05)
             else:
                 # Build ACC override payload via DBC packing slice
-                payload = build_frame(angle_cmd, 0)
+                payload = build_frame(angle_cmd)
                 buf = build_override_payload(0x48, 1, payload)
-                print(f"Hex: {buf.hex()} Angle: {angle_cmd}, Torque: {torque_cmd}")
+                print(f"Hex: {buf.hex()} Angle: {angle_cmd}")
                 try:
                     dev.write(EP_VENDOR_OUT, buf, timeout=1000)
                     send_count += 1
@@ -288,7 +285,9 @@ def main() -> int:
                 sends_in_second = 0
                 last_second = sec
                 paused = monitor.should_pause()
-                print(f"mode={mode} angle_amp={angle_amp:.1f}deg torque_amp={min(torque_amp, MAX_TORQUE):.2f}Nm halfT={half_period_s:.2f}s send_fps={fps} paused={paused}")
+                print(
+                    f"mode={mode} angle_amp={angle_amp:.1f}deg halfT={half_period_s:.2f}s send_fps={fps} paused={paused}"
+                )
 
             # pacing ~50 Hz
             time.sleep(0.02)
@@ -304,5 +303,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
