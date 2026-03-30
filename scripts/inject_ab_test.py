@@ -99,11 +99,13 @@ def pack_acc_payload(values: dict):
 def build_frame(counter: int, angle_deg: float) -> bytes:
     values = {"STEER_ANGLE_REQUEST": angle_deg, "COUNTER": counter}
     data = pack_acc_payload(values)[1]
-    crc = crc8(data[1:], 0xD6)  # 0x48 magic
+    crc = crc8(data[2:], 0xD6)  # 0x48 magic
 
     # Pack again with checksum filled in
     values = {"STEER_ANGLE_REQUEST": angle_deg, "COUNTER": counter, "CHECKSUM": crc}
     data = pack_acc_payload(values)[1]
+
+    assert data[1] == crc8(data[2:], 0xD6)  # Sanity check
     return data
 
 
