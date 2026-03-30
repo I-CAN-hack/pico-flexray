@@ -67,20 +67,20 @@ _PACKER = CANPacker(_DBC_PATH)
 _DBC = _PACKER.dbc
 
 STEER_REQUEST_DEFAULTS = {
-    'CYCLE_COUNT': 0,
-    'CHECKSUM': 0,
-    'COUNTER': 0,
-    'SET_ME_0x9': 0x9,
-    'STEER_ANGLE_REQUEST': 0.0,
-    'STEER_TORQUE_REQ': 0,
-    'ASSIST_TORQUE': 200,
-    'SET_ME_0xFE': 0xFE,
-    'SET_ME_0x17': 0x17,
-    'SET_ME_0xFF': 0xFF,
-    'SET_ME_0x3': 0x3,
-    'ACTIVE': 2, # Active
-    'SET_ME_0xFA_1': 0xFA,
-    'SET_ME_0xFA_2': 0xFA,
+    "CYCLE_COUNT": 0,
+    "CHECKSUM": 0,
+    "COUNTER": 0,
+    "SET_ME_0x9": 0x9,
+    "STEER_ANGLE_REQUEST": 0.0,
+    "STEER_TORQUE_REQUEST": 0,
+    "ASSIST_TORQUE": 200,
+    "SET_ME_0xFE": 0xFE,
+    "SET_ME_0x17": 0x17,
+    "SET_ME_0xFF": 0xFF,
+    "SET_ME_0x3": 0x3,
+    "ACTIVE": 2,  # Active
+    "SET_ME_0xFA_1": 0xFA,
+    "SET_ME_0xFA_2": 0xFA,
 }
 
 #          B8 61 FC 7F 02 01 00 AO FE 17 FF 23 A2 FA
