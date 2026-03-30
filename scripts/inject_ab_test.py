@@ -66,27 +66,24 @@ _DBC_PATH = os.path.join(os.path.dirname(__file__), "..", "dbc", "bmw_sp2018.dbc
 _PACKER = CANPacker(_DBC_PATH)
 _DBC = _PACKER.dbc
 
+
 STEER_REQUEST_DEFAULTS = {
-    "CYCLE_COUNT": 0,
+    "CYCLE_COUNT": 1,
     "CHECKSUM": 0,
     "COUNTER": 0,
     "SET_ME_0x9": 0x9,
     "STEER_ANGLE_REQUEST": 0.0,
-    "STEER_TORQUE_REQUEST": 0,
-    "ASSIST_TORQUE": 200,
+    "STEER_TORQUE_REQUEST": 0.0,
+    "ASSIST_TORQUE": 0xA0,
+    "ASSIST_MODE": 0x1,
     "SET_ME_0xFE": 0xFE,
     "SET_ME_0x17": 0x17,
     "SET_ME_0xFF": 0xFF,
     "SET_ME_0x3": 0x3,
     "ACTIVE": 2,  # Active
-    "SET_ME_0xFA_1": 0xFA,
-    "SET_ME_0xFA_2": 0xFA,
+    "SET_ME_0xA2": 0xA2,
+    "SET_ME_0xFA": 0xFA,
 }
-
-#          B8 61 FC 7F 02 01 00 AO FE 17 FF 23 A2 FA
-#          96 64 1f 80 00 01 00 a0 fe 17 ff 23 a2 fa
-
-# 01 48 90 a8 61 fe 7f 00 01 00 a0 fe 17 ff 23 a2 fa
 
 
 def pack_acc_payload(values: dict):
