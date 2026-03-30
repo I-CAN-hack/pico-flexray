@@ -62,33 +62,25 @@ def build_override_payload(frame_id: int, base: int, data_bytes: bytes) -> bytes
 
 
 # Initialize CANPacker with local DBC path
-_DBC_PATH = os.path.join(os.path.dirname(__file__), "..", "dbc", "lateral.dbc")
+_DBC_PATH = os.path.join(os.path.dirname(__file__), "..", "dbc", "bmw_sp2018.dbc")
 _PACKER = CANPacker(_DBC_PATH)
 _DBC = _PACKER.dbc
 
-# Expose full-field packing for ACC so you can tune every field
-ACC_DEFAULTS = {
-    "cycle_count": 0,
-    "crc1": 0,
-    "cnt1": 0,
-    "always_0x9": 0x9,
-    "steering_angle_req": 0.0,
-    "steer_torque_req": 0.0,
-    "TJA_ready": 0,
-    "assist_mode": 0,
-    # "wayback_en1_lane_keeping_trigger": 0x1F,  # Full byte, upper nibble 1 makes it go fast
-    "wayback_en1_lane_keeping_trigger": 0x00,  # Full byte, upper nibble 1 makes it go fast
-    "lane_keeping_triggered": 0,
-    "like_assist_torque_reserve": 200,  # 160, 200, > faults
-    # "constants": 0x03FF17FE,
-    "SET_ME_0xFE": 0xFE,
-    "SET_ME_0x17": 0x17,
-    "SET_ME_0xFF": 0xFF,
-    "SET_ME_0x03": 0x03,
-    "wayback_en_2": 0,  # Not sure what this does
-    "steering_engaged": 2,
-    "maybe_assist_force_enhance": 250,  # >= 253 faults
-    "maybe_assist_force_weaken": 250,
+STEER_REQUEST_DEFAULTS = {
+    'CYCLE_COUNT': 0,
+    'CHECKSUM': 0,
+    'COUNTER': 0,
+    'SET_ME_0x9': 0x9,
+    'STEER_ANGLE_REQUEST': 0.0,
+    'STEER_TORQUE_REQ': 0,
+    'ASSIST_TORQUE': 200,
+    'SET_ME_0xFE': 0xFE,
+    'SET_ME_0x17': 0x17,
+    'SET_ME_0xFF': 0xFF,
+    'SET_ME_0x3': 0x3,
+    'ACTIVE': 2, # Active
+    'SET_ME_0xFA_1': 0xFA,
+    'SET_ME_0xFA_2': 0xFA,
 }
 
 #          B8 61 FC 7F 02 01 00 AO FE 17 FF 23 A2 FA
@@ -102,9 +94,9 @@ def pack_acc_payload(values: dict):
 
     Note: crc1/cnt1 are not auto-computed for this custom DBC; set them explicitly if needed.
     """
-    merged = dict(ACC_DEFAULTS)
+    merged = dict(STEER_REQUEST_DEFAULTS)
     merged.update(values)
-    msg = _PACKER.make_can_msg("ACC", 0, merged)
+    msg = _PACKER.make_can_msg("STEER_REQUEST", 0, merged)
     return msg
 
 
@@ -125,7 +117,7 @@ def crc8_checksum(data: bytes, init_value: int) -> int:
 
 
 def build_frame(angle_deg: float) -> bytes:
-    values = {"steering_angle_req": angle_deg}
+    values = {"STEER_ANGLE_REQUEST": angle_deg}
     data = pack_acc_payload(values)[1]
     crc = crc8_checksum(data[1:], 0xF1)
     data = bytearray(data)
