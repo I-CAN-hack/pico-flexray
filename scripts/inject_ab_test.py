@@ -7,6 +7,8 @@ import sys
 import threading
 import time
 
+import hid
+import numpy as np
 from opendbc.can.packer import CANPacker
 from opendbc.can.parser import CANParser
 
@@ -24,6 +26,8 @@ PANDA_PID = 0xDDCC
 # TinyUSB vendor endpoints (see usb_descriptors.c)
 EP_VENDOR_OUT = 0x03
 EP_VENDOR_IN = 0x81
+
+EXPO = 0.4
 
 
 def find_device():
@@ -67,18 +71,23 @@ ACC_DEFAULTS = {
     "cycle_count": 0,
     "crc1": 0,
     "cnt1": 0,
-    "always_0x9": 9,
+    "always_0x9": 0x9,
     "steering_angle_req": 0.0,
     "steer_torque_req": 0.0,
     "TJA_ready": 0,
     "assist_mode": 0,
-    "wayback_en1_lane_keeping_trigger": 31,
+    # "wayback_en1_lane_keeping_trigger": 0x1F,  # Full byte, upper nibble 1 makes it go fast
+    "wayback_en1_lane_keeping_trigger": 0x00,  # Full byte, upper nibble 1 makes it go fast
     "lane_keeping_triggered": 0,
-    "like_assist_torque_reserve": 200,
-    "constants": 0x03FF17FE,
-    "wayback_en_2": 1,
+    "like_assist_torque_reserve": 200,  # 160, 200, > faults
+    # "constants": 0x03FF17FE,
+    "SET_ME_0xFE": 0xFE,
+    "SET_ME_0x17": 0x17,
+    "SET_ME_0xFF": 0xFF,
+    "SET_ME_0x03": 0x03,
+    "wayback_en_2": 0,  # Not sure what this does
     "steering_engaged": 2,
-    "maybe_assist_force_enhance": 250,
+    "maybe_assist_force_enhance": 250,  # >= 253 faults
     "maybe_assist_force_weaken": 250,
 }
 
@@ -124,79 +133,11 @@ def build_frame(angle_deg: float) -> bytes:
     return data
 
 
-class KeyInput(threading.Thread):
-    def __init__(self):
-        super().__init__(daemon=True)
-        self.q: "queue.Queue[str]" = queue.Queue()
-
-    def run(self):
-        try:
-            while True:
-                ch = sys.stdin.read(1)
-                if not ch:
-                    break
-                self.q.put(ch)
-        except Exception:
-            pass
-
-    def get_nowait(self) -> str:
-        try:
-            return self.q.get_nowait()
-        except queue.Empty:
-            return ""
-
-
-class DataMonitor(threading.Thread):
-    """Reads from IN endpoint to detect whether bus data is flowing. Sets paused if silent."""
-
-    def __init__(self, dev: "usb.core.Device", silence_timeout_s: float = 0.7):
-        super().__init__(daemon=True)
-        self.dev = dev
-        self.silence_timeout_s = silence_timeout_s
-        self.last_data_time = time.time()
-        self._stop = False
-
-    def run(self):
-        while not self._stop:
-            try:
-                # Small read to detect activity; timeout short
-                data = self.dev.read(EP_VENDOR_IN, 64, timeout=100)  # type: ignore
-                if data and len(data) > 0:
-                    self.last_data_time = time.time()
-            except usb.core.USBTimeoutError:
-                pass
-            except usb.core.USBError:
-                # transient errors; keep trying
-                time.sleep(0.1)
-            except Exception:
-                time.sleep(0.1)
-
-    def should_pause(self) -> bool:
-        return (time.time() - self.last_data_time) > self.silence_timeout_s
-
-    def stop(self):
-        self._stop = True
-
-
-def print_help():
-    print("\nControls:")
-    print("  a: switch to Angle-only mode")
-    print("  t: switch to Torque-only mode")
-    print("  + / - : increase / decrease amplitude")
-    print("  f: faster sweep   s: slower sweep")
-    print("  q: quit")
-    print("")
-
-
 def main() -> int:
     # Initial params
     mode = "A"  # A: angle-only, T: torque-only
     angle_amp = 90.0  # deg peak for triangle wave
     half_period_s = 1.0
-
-    print("FlexRay A/B injection (Angle vs Torque)")
-    print("=====================================")
-    print_help()
 
     dev = find_device()
     if dev is None:
@@ -206,97 +147,66 @@ def main() -> int:
         )
         return 1
 
-    key_thread = KeyInput()
-    key_thread.start()
+    gamepad = hid.device()
+    gamepad.open(0x046D, 0xC215)
+    gamepad.set_nonblocking(True)
 
-    monitor = DataMonitor(dev)
-    monitor.start()
-
-    start_time = time.time()
     send_count = 0
-    last_second = int(time.time())
     sends_in_second = 0
-
-    angle_cmd = 0
 
     its = 0
 
-    try:
-        while True:
-            its += 1
-            # Handle keys
-            ch = key_thread.get_nowait()
-            if ch:
-                if ch == "q":
+    enabled = False
+    prev_button = False
+
+    angle_cmd = 0
+    angle_cmd_prev = 0
+
+    while True:
+        its += 1
+
+        # Handle joystick
+        report = gamepad.read(64)
+        if report:
+            button = report[4] == 1
+
+            if button and not prev_button:
+                enabled = False if enabled else True
+
+            prev_button = button
+
+            norm = np.interp(report[3], [0, 255], [-1, 1])
+            norm = norm if abs(norm) > 0.03 else 0.0
+            norm = EXPO * norm**3 + (1 - EXPO) * norm
+
+            angle_cmd = norm * -360
+
+        # Build ACC override payload via DBC packing slice
+        max_diff = 5
+        to_send = np.clip(
+            angle_cmd, angle_cmd_prev - max_diff, angle_cmd_prev + max_diff
+        )
+        payload = build_frame(to_send)
+        angle_cmd_prev = to_send
+        buf = build_override_payload(0x48, 1, payload)
+        print(f"Hex: {buf.hex()} Angle: {to_send} Enabled: {enabled}")
+
+        if enabled:
+            try:
+                dev.write(EP_VENDOR_OUT, buf, timeout=1000)
+                send_count += 1
+                sends_in_second += 1
+            except usb.core.USBError as e:
+                print(f"USB write failed: {e}", file=sys.stderr)
+                # Try to reconnect
+                time.sleep(0.2)
+                dev = find_device()
+                if dev is None:
+                    print("Reconnection failed. Exiting.", file=sys.stderr)
                     break
-                elif ch == "a":
-                    mode = "A"
-                elif ch == "+":
-                    angle_amp = min(45.0, angle_amp + 1.0)
-                elif ch == "-":
-                    angle_amp = max(1.0, angle_amp - 1.0)
-                elif ch == "f":
-                    half_period_s = max(0.5, half_period_s * 0.8)
-                elif ch == "s":
-                    half_period_s = min(10.0, half_period_s * 1.25)
 
-            # Generate setpoints
-            # t_rel = (time.time() - start_time) % (2 * half_period_s)
-            # if t_rel < half_period_s:
-            #     angle_cmd = -angle_amp + (2 * angle_amp) * (t_rel / half_period_s)
-            # else:
-            #     angle_cmd = angle_amp - (2 * angle_amp) * (
-            #         (t_rel - half_period_s) / half_period_s
-            #     )
-
-            # angle_cmd = 90
-            #
-            cmd = (its // 100) % 2
-            angle_cmd = 360 if cmd else -360
-            #
-            # angle_cmd = min(its, 360 + 45)
-
-            # Pause injection if no bus data is observed recently
-            if monitor.should_pause():
-                # Brief idle before next check
-                time.sleep(0.05)
-            else:
-                # Build ACC override payload via DBC packing slice
-                payload = build_frame(angle_cmd)
-                buf = build_override_payload(0x48, 1, payload)
-                print(f"Hex: {buf.hex()} Angle: {angle_cmd}")
-                try:
-                    dev.write(EP_VENDOR_OUT, buf, timeout=1000)
-                    send_count += 1
-                    sends_in_second += 1
-                except usb.core.USBError as e:
-                    print(f"USB write failed: {e}", file=sys.stderr)
-                    # Try to reconnect
-                    time.sleep(0.2)
-                    dev = find_device()
-                    if dev is None:
-                        print("Reconnection failed. Exiting.", file=sys.stderr)
-                        break
-
-            now = time.time()
-            sec = int(now)
-            if sec != last_second:
-                fps = sends_in_second
-                sends_in_second = 0
-                last_second = sec
-                paused = monitor.should_pause()
-                print(
-                    f"mode={mode} angle_amp={angle_amp:.1f}deg halfT={half_period_s:.2f}s send_fps={fps} paused={paused}"
-                )
-
-            # pacing ~50 Hz
-            time.sleep(0.02)
-
-    finally:
-        try:
-            monitor.stop()
-        except Exception:
-            pass
+        # pacing ~50 Hz
+        time.sleep(0.02)
 
     return 0
 
