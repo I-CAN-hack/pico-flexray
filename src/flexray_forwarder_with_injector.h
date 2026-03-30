@@ -5,19 +5,19 @@
 #include <stdbool.h>
 #include "hardware/pio.h"
 
-// Cache a frame's raw bytes (header+payload+CRC) when rules match
+// Cache a frame's raw bytes (header + payload + CRC) when rules match.
 void try_cache_last_target_frame(uint16_t frame_id, uint8_t cycle_count, uint16_t frame_length, uint8_t *captured_bytes);
 
-// On receiving a frame, check triggers; if matched, mutate template and request injection
+// On receiving a frame, check triggers; if matched, inject using the cached target frame template.
 void try_inject_frame(uint16_t frame_id, uint8_t cycle_count);
 
 void setup_forwarder_with_injector(PIO pio,
     uint rx_pin_from_ecu, uint tx_pin_to_vehicle,
     uint rx_pin_from_vehicle, uint tx_pin_to_ecu);
 
-// Submit a host-provided replacement slice to be used on next matching injection
-// bytes must contain only the replacement payload slice; length must equal rule->replace_len
-// The override applies when id matches a rule's target_id and (cycle_count & rule->cycle_mask) == rule->cycle_base
+// Submit a host-provided payload override.
+// bytes must contain [cycle_count][full payload bytes].
+// The queued payload is applied to the cached target frame when a matching masked cycle slot is triggered.
 bool injector_submit_override(uint16_t id, uint8_t base, uint16_t len, const uint8_t *bytes);
 
 // Enable/disable injection at runtime
@@ -26,5 +26,3 @@ bool injector_is_enabled(void);
 
 
 #endif // FLEXRAY_FORWARDER_WITH_INJECTOR_H
-
-

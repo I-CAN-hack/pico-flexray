@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-import math
 import os
-import queue
 import struct
 import sys
-import threading
 import time
 
 import hid
 import numpy as np
 from opendbc.can.packer import CANPacker
 from opendbc.can.parser import CANParser
+
+from crc8 import crc8
 
 try:
     import usb.core  # type: ignore
@@ -97,37 +96,18 @@ def pack_acc_payload(values: dict):
     return msg
 
 
-def crc8_checksum(data: bytes, init_value: int) -> int:
-    """
-    Compute CRC-8 using polynomial 0x1D (MSB-first), no final XOR.
-    init_value is the initial CRC register value.
-    """
-    crc: int = init_value & 0xFF
-    for byte in data:
-        crc ^= byte & 0xFF
-        for _ in range(8):
-            if (crc & 0x80) != 0:
-                crc = ((crc << 1) ^ 0x1D) & 0xFF
-            else:
-                crc = (crc << 1) & 0xFF
-    return crc
-
-
-def build_frame(angle_deg: float) -> bytes:
-    values = {"STEER_ANGLE_REQUEST": angle_deg}
+def build_frame(counter: int, angle_deg: float) -> bytes:
+    values = {"STEER_ANGLE_REQUEST": angle_deg, "COUNTER": counter}
     data = pack_acc_payload(values)[1]
-    crc = crc8_checksum(data[1:], 0xF1)
-    data = bytearray(data)
-    data[0] = crc
+    crc = crc8(data[1:], 0xD6)  # 0x48 magic
+
+    # Pack again with checksum filled in
+    values = {"STEER_ANGLE_REQUEST": angle_deg, "COUNTER": counter, "CHECKSUM": crc}
+    data = pack_acc_payload(values)[1]
     return data
 
 
 def main() -> int:
-    # Initial params
-    mode = "A"  # A: angle-only, T: torque-only
-    angle_amp = 90.0  # deg peak for triangle wave
-    half_period_s = 1.0
-
     dev = find_device()
     if dev is None:
         print(
@@ -175,7 +155,7 @@ def main() -> int:
         to_send = np.clip(
             angle_cmd, angle_cmd_prev - max_diff, angle_cmd_prev + max_diff
         )
-        payload = build_frame(to_send)
+        payload = build_frame(its & 0xF, to_send)
         angle_cmd_prev = to_send
         buf = build_override_payload(0x48, 1, payload)
         print(f"Hex: {buf.hex()} Angle: {to_send} Enabled: {enabled}")

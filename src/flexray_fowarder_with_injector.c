@@ -22,14 +22,13 @@ static dma_channel_config injector_to_ecu_dc;
 // rules now come from flexray_injector_rules.h
 
 typedef struct {
-    uint8_t valid;  // 1 if data[] is valid
-    uint16_t len;    // header + payload bytes + 3 CRC bytes (max 262)
+    uint8_t valid;
+    uint16_t len;
     uint8_t data[MAX_FRAME_PAYLOAD_BYTES + 8];
 } frame_template_t;
 
 static frame_template_t TEMPLATES[NUM_TRIGGER_RULES];
 
-// Host override storage: small ring to avoid malloc; single-consumer in ISR context
 typedef struct {
     uint8_t valid;
     uint16_t id;
@@ -47,6 +46,10 @@ static volatile bool injector_enabled = true;
 
 static inline bool host_override_push(uint16_t id, uint8_t mask, uint8_t base, uint16_t len, const uint8_t *bytes)
 {
+    if (len > sizeof(host_overrides[0].data)) {
+        return false;
+    }
+
     uint32_t next_head = (host_override_head + 1u) % HOST_OVERRIDE_CAP;
     if (next_head == host_override_tail) {
         // drop oldest on overflow
@@ -57,14 +60,13 @@ static inline bool host_override_push(uint16_t id, uint8_t mask, uint8_t base, u
     slot->mask = mask;
     slot->base = base;
     slot->len = len;
-    if (len > sizeof(slot->data)) len = sizeof(slot->data);
     memcpy(slot->data, bytes, len);
     __atomic_store_n(&slot->valid, 1, __ATOMIC_RELEASE);
     host_override_head = next_head;
     return true;
 }
 
-static inline bool host_override_try_pop_for(uint16_t id, uint8_t cycle_count, uint8_t *out)
+static inline bool host_override_try_pop_for(uint16_t id, uint8_t cycle_count, uint8_t *out, uint16_t *out_len)
 {
     uint32_t t = host_override_tail;
     while (t != host_override_head) {
@@ -75,6 +77,7 @@ static inline bool host_override_try_pop_for(uint16_t id, uint8_t cycle_count, u
             // invalidate and advance tail to this+1
             slot->valid = 0;
             host_override_tail = (t + 1u) % HOST_OVERRIDE_CAP;
+            *out_len = slot->len;
             return true;
         }
         t = (t + 1u) % HOST_OVERRIDE_CAP;
@@ -82,9 +85,22 @@ static inline bool host_override_try_pop_for(uint16_t id, uint8_t cycle_count, u
     return false;
 }
 
-static inline int find_cache_slot_for_id(uint16_t id, uint8_t cycle_count) {
+static inline const trigger_rule_t *find_rule_for_id_and_base(uint16_t id, uint8_t base) {
     for (int i = 0; i < (int)NUM_TRIGGER_RULES; i++) {
-        if (INJECT_TRIGGERS[i].target_id == id && (uint8_t)(cycle_count & INJECT_TRIGGERS[i].cycle_mask) == INJECT_TRIGGERS[i].cycle_base) return i;
+        if (INJECT_TRIGGERS[i].target_id == id && INJECT_TRIGGERS[i].cycle_base == base) {
+            return &INJECT_TRIGGERS[i];
+        }
+    }
+    return NULL;
+}
+
+static inline int find_cache_slot_for_id(uint16_t id, uint8_t cycle_count)
+{
+    for (int i = 0; i < (int)NUM_TRIGGER_RULES; i++) {
+        if (INJECT_TRIGGERS[i].target_id == id &&
+            (uint8_t)(cycle_count & INJECT_TRIGGERS[i].cycle_mask) == INJECT_TRIGGERS[i].cycle_base) {
+            return i;
+        }
     }
     return -1;
 }
@@ -92,38 +108,22 @@ static inline int find_cache_slot_for_id(uint16_t id, uint8_t cycle_count) {
 void try_cache_last_target_frame(uint16_t frame_id, uint8_t cycle_count, uint16_t frame_len, uint8_t *captured_bytes)
 {
     int slot = find_cache_slot_for_id(frame_id, cycle_count);
-    if (slot < 0){
-        return;
-    }
-
-    const trigger_rule_t *rule = &INJECT_TRIGGERS[slot];
-    if ((uint8_t)(cycle_count & rule->cycle_mask) != rule->cycle_base){
+    if (slot < 0) {
         return;
     }
 
     if (frame_len > sizeof(TEMPLATES[slot].data)) {
         return;
     }
+
     memcpy(TEMPLATES[slot].data, captured_bytes, frame_len);
-    TEMPLATES[slot].len = (uint16_t)frame_len;
+    TEMPLATES[slot].len = frame_len;
     TEMPLATES[slot].valid = 1;
 }
 
 static void fix_cycle_count(uint8_t *full_frame, uint8_t cycle_count)
 {
-    // set full_frame[4] low 6 bits to cycle_count
-    full_frame[4] = (full_frame[4] & 0b11000000) | (cycle_count & 0x3F);
-}
-
-static void fix_e2e_payload(uint8_t *e2e_start_offset, uint8_t init_value, uint8_t len)
-{
-    // advance e2e alive counter lower nibble
-    uint8_t nibble = (e2e_start_offset[1] & 0x0F) + 1;
-    if (nibble == 0x0F) {
-        nibble = 0;
-    }
-    e2e_start_offset[1] = (e2e_start_offset[1] & 0xF0) | (nibble & 0x0F);
-    e2e_start_offset[0] = calculate_autosar_e2e_crc8(e2e_start_offset+1, init_value, len);
+    full_frame[4] = (full_frame[4] & 0xC0u) | (cycle_count & 0x3Fu);
 }
 
 static void inject_frame(uint8_t *full_frame, uint16_t injector_payload_length, uint8_t direction)
@@ -143,9 +143,7 @@ static void inject_frame(uint8_t *full_frame, uint16_t injector_payload_length, 
     }
 }
 
-// flexray_frame_t dummy_frame;
-// always fetch cache before store new value
-uint8_t replace_bytes[254];
+static uint8_t override_payload_bytes[MAX_FRAME_PAYLOAD_BYTES];
 void __time_critical_func(try_inject_frame)(uint16_t frame_id, uint8_t cycle_count)
 {
     // Find any trigger where current frame is the "previous" id
@@ -158,24 +156,26 @@ void __time_critical_func(try_inject_frame)(uint16_t frame_id, uint8_t cycle_cou
         }
 
         int target_slot = find_cache_slot_for_id(INJECT_TRIGGERS[i].target_id, cycle_count);
-        if (target_slot < 0){
+        if (target_slot < 0) {
             continue;
         }
 
         frame_template_t *tpl = &TEMPLATES[target_slot];
-        uint8_t *tpl_payload = tpl->data+5;
-        if (!tpl->valid || tpl->len < 8){
+        if (!tpl->valid || tpl->len < 8) {
             continue;
         }
 
-        bool has_data = host_override_try_pop_for(INJECT_TRIGGERS[i].target_id, cycle_count, replace_bytes);
+        uint16_t override_payload_len = 0;
+        bool has_data = host_override_try_pop_for(INJECT_TRIGGERS[i].target_id, cycle_count, override_payload_bytes, &override_payload_len);
         if (!has_data) {
             continue;
         }
 
-        memcpy(tpl_payload+INJECT_TRIGGERS[i].replace_offset, replace_bytes, INJECT_TRIGGERS[i].replace_len);
-    
-        fix_e2e_payload(tpl_payload+INJECT_TRIGGERS[i].e2e_offset, INJECT_TRIGGERS[i].e2e_init_value, INJECT_TRIGGERS[i].e2e_len);
+        if (override_payload_len != INJECT_TRIGGERS[i].replace_len) {
+            continue;
+        }
+
+        memcpy(tpl->data + 5 + INJECT_TRIGGERS[i].replace_offset, override_payload_bytes, override_payload_len);
         fix_cycle_count(tpl->data, cycle_count);
         fix_flexray_frame_crc(tpl->data, tpl->len);
         inject_frame(tpl->data, tpl->len, INJECT_TRIGGERS[i].direction);
@@ -210,39 +210,35 @@ static void setup_dma(void){
 
 bool injector_submit_override(uint16_t id, uint8_t base, uint16_t len, const uint8_t *bytes)
 {
-    // Host should provide only the replacement slice, not a full frame.
-    // Match the provided id/base against a trigger rule's target_id/cycle_base
-    // and enforce len == rule->replace_len. We use the rule's cycle_mask/cycle_base.
     if (bytes == NULL) {
         return false;
     }
 
-    if (len < 1 || len > MAX_FRAME_PAYLOAD_BYTES+1) {
+    if (len < 1 || len > MAX_FRAME_PAYLOAD_BYTES + 1) {
         return false;
     }
 
-    uint8_t crc = calculate_autosar_e2e_crc8(bytes+1, 0xf1, len-1);
-    if (crc != bytes[0]) {
-        return false;
-    }
-
-    const trigger_rule_t *matched_rule = NULL;
-    for (int i = 0; i < (int)NUM_TRIGGER_RULES; i++) {
-        if (INJECT_TRIGGERS[i].target_id == id && INJECT_TRIGGERS[i].cycle_base == base) {
-            matched_rule = &INJECT_TRIGGERS[i];
-            break;
-        }
-    }
+    const trigger_rule_t *matched_rule = find_rule_for_id_and_base(id, base);
     if (matched_rule == NULL) {
         return false;
     }
-    len = len - 1 - matched_rule->replace_offset;
 
-    if (len != matched_rule->replace_len) {
+    uint16_t payload_len = (uint16_t)(len - 1u);
+    if ((uint8_t)(bytes[0] & matched_rule->cycle_mask) != matched_rule->cycle_base) {
         return false;
     }
-    // bytes+1: skip the first byte, which is the cycle count
-    return host_override_push(id, matched_rule->cycle_mask, matched_rule->cycle_base, matched_rule->replace_len, bytes + 1 + matched_rule->replace_offset);
+
+    if (payload_len != (uint16_t)(matched_rule->replace_offset + matched_rule->replace_len)) {
+        return false;
+    }
+
+    return host_override_push(
+        id,
+        matched_rule->cycle_mask,
+        matched_rule->cycle_base,
+        matched_rule->replace_len,
+        bytes + 1 + matched_rule->replace_offset
+    );
 }
 
 void injector_set_enabled(bool enabled)

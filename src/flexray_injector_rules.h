@@ -7,12 +7,9 @@
 #define INJECT_DIRECTION_TO_ECU 0
 typedef struct {
 	uint16_t trigger_id;    // when this id arrives...
-	uint16_t target_id;  // ...inject using cached template of this id (if available)
+	uint16_t target_id;  // ...inject using the cached template of this id
 	uint8_t cycle_mask;
 	uint8_t cycle_base;
-	uint8_t e2e_offset;
-	uint8_t e2e_len;
-	uint8_t e2e_init_value;
 	uint8_t replace_offset;
 	uint8_t replace_len;
 	uint8_t direction;
@@ -25,11 +22,8 @@ static const trigger_rule_t INJECT_TRIGGERS[] = {
 		.target_id = 0x48,
 		.cycle_mask = 0b11,
 		.cycle_base = 1,
-		.e2e_offset = 0,
-		.e2e_len = 15,
-		.e2e_init_value = 0xd6,
-		.replace_offset = 2,
-		.replace_len = 14,
+		.replace_offset = 0,
+		.replace_len = 16,
 		.direction = INJECT_DIRECTION_TO_ECU,
 	},
 };
@@ -37,5 +31,3 @@ static const trigger_rule_t INJECT_TRIGGERS[] = {
 #define NUM_TRIGGER_RULES (sizeof(INJECT_TRIGGERS)/sizeof(INJECT_TRIGGERS[0]))
 
 #endif // FLEXRAY_INJECTOR_RULES_H
-
-

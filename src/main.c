@@ -315,7 +315,6 @@ int main(void)
                 else if (is_valid_frame(&frame, header))
                 {
                     stats.valid++;
-                    // Cache validated frame (header + payload + CRC)
                     try_cache_last_target_frame(frame.frame_id, frame.cycle_count, expected_len, header);
                     panda_flexray_fifo_push(&frame);
                 }

@@ -35,10 +35,11 @@ static bool handle_control_data_stage(tusb_control_request_t const *request, uin
 static bool try_send_from_fifo(const char *context);
 // ------------------------------------------------------------
 // Vendor OUT protocol (host -> device)
-//  op 0x90: Push override replacement slice
-//    [0x90][u16 id][u8 base][u16 len][len bytes slice]
+//  op 0x90: Push override payload
+//    [0x90][u16 id][u8 base][u16 len][u8 cycle_count][payload bytes]
 //    - id must match a trigger_rule_t.target_id; base must match rule.cycle_base
-//    - len must equal rule.replace_len
+//    - payload bytes overwrite the cached target frame payload
+//    - firmware still fixes the FlexRay header cycle count and frame CRC before injection
 //  op 0x91: Set injector enable
 //    [0x91][u8 enabled]
 // ------------------------------------------------------------
