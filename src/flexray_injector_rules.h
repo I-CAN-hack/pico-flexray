@@ -26,6 +26,15 @@ static const trigger_rule_t INJECT_TRIGGERS[] = {
 		.replace_len = 16,
 		.direction = INJECT_DIRECTION_TO_ECU,
 	},
+	{
+		.trigger_id = 0x42,
+		.target_id = 0x44,
+		.cycle_mask = 0b01,
+		.cycle_base = 0,
+		.replace_offset = 0,
+		.replace_len = 16,
+		.direction = INJECT_DIRECTION_TO_ECU,
+	},
 };
 
 #define NUM_TRIGGER_RULES (sizeof(INJECT_TRIGGERS)/sizeof(INJECT_TRIGGERS[0]))
