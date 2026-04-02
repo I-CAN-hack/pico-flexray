@@ -152,15 +152,18 @@ def main() -> int:
 
             angle_cmd = norm * -360
 
+        # rate limit
+        # max_diff = 5
+        # to_send = np.clip(
+        #     angle_cmd, angle_cmd_prev - max_diff, angle_cmd_prev + max_diff
+        # )
+        # angle_cmd_prev = to_send
+        #
+
         # Build ACC override payload via DBC packing slice
-        max_diff = 5
-        to_send = np.clip(
-            angle_cmd, angle_cmd_prev - max_diff, angle_cmd_prev + max_diff
-        )
-        payload = build_frame(its & 0xF, to_send)
-        angle_cmd_prev = to_send
+        payload = build_frame(its & 0xF, angle_cmd)
         buf = build_override_payload(0x48, 1, payload)
-        print(f"Hex: {buf.hex()} Angle: {to_send} Enabled: {enabled}")
+        print(f"Hex: {buf.hex()} Angle: {angle_cmd} Enabled: {enabled}")
 
         if enabled:
             try:
