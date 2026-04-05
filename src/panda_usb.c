@@ -36,7 +36,8 @@ static bool try_send_from_fifo(const char *context);
 // ------------------------------------------------------------
 // Vendor OUT protocol (host -> device)
 //  op 0x90: Push override payload
-//    [0x90][u16 id][u8 base][u16 len][u8 cycle_count][payload bytes]
+//    [0x90][u16 id][u8 base][u16 len][dbc_payload bytes]
+//    - dbc_payload byte 0 is the synthetic cycle count; remaining bytes overwrite the cached on-wire payload
 //    - id must match a trigger_rule_t.target_id; base must match rule.cycle_base
 //    - payload bytes overwrite the cached target frame payload
 //    - firmware still fixes the FlexRay header cycle count and frame CRC before injection

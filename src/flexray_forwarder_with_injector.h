@@ -16,7 +16,8 @@ void setup_forwarder_with_injector(PIO pio,
     uint rx_pin_from_vehicle, uint tx_pin_to_ecu);
 
 // Submit a host-provided payload override.
-// bytes must contain [cycle_count][full payload bytes].
+// bytes must contain the DBC-form payload, where byte 0 is the synthetic cycle count
+// and the remaining bytes map onto the on-wire FlexRay payload.
 // The queued payload is applied to the cached target frame when a matching masked cycle slot is triggered.
 bool injector_submit_override(uint16_t id, uint8_t base, uint16_t len, const uint8_t *bytes);
 

@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "hardware/dma.h"
+#include "hardware/sync.h"
 #include "flexray_frame.h"
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
@@ -24,8 +25,8 @@ static dma_channel_config injector_to_ecu_dc;
 typedef struct {
     uint8_t valid;
     uint16_t len;
-    uint8_t data[MAX_FRAME_PAYLOAD_BYTES + 8];
-} frame_template_t;
+    uint8_t data[MAX_FRAME_BUF_SIZE_BYTES];
+} __attribute__((aligned(4))) frame_template_t;
 
 static frame_template_t TEMPLATES[NUM_TRIGGER_RULES];
 
@@ -35,7 +36,7 @@ typedef struct {
     uint8_t mask;
     uint8_t base;
     uint16_t len;
-    uint8_t data[MAX_FRAME_PAYLOAD_BYTES + 8];
+    uint8_t data[MAX_FRAME_BUF_SIZE_BYTES];
 } host_override_t;
 
 #define HOST_OVERRIDE_CAP 4
@@ -43,8 +44,11 @@ static volatile uint32_t host_override_head = 0;
 static volatile uint32_t host_override_tail = 0;
 static host_override_t host_overrides[HOST_OVERRIDE_CAP];
 static volatile bool injector_enabled = true;
+static spin_lock_t *injector_state_lock;
+static uint8_t inject_tx_buffers[2][MAX_FRAME_BUF_SIZE_BYTES] __attribute__((aligned(4)));
+static uint8_t next_inject_tx_buffer = 0;
 
-static inline bool host_override_push(uint16_t id, uint8_t mask, uint8_t base, uint16_t len, const uint8_t *bytes)
+static inline bool host_override_push_locked(uint16_t id, uint8_t mask, uint8_t base, uint16_t len, const uint8_t *bytes)
 {
     if (len > sizeof(host_overrides[0].data)) {
         return false;
@@ -66,7 +70,7 @@ static inline bool host_override_push(uint16_t id, uint8_t mask, uint8_t base, u
     return true;
 }
 
-static inline bool host_override_try_pop_for(uint16_t id, uint8_t cycle_count, uint8_t *out, uint16_t *out_len)
+static inline bool host_override_try_pop_for_locked(uint16_t id, uint8_t cycle_count, uint8_t *out, uint16_t *out_len)
 {
     uint32_t t = host_override_tail;
     while (t != host_override_head) {
@@ -116,9 +120,11 @@ void try_cache_last_target_frame(uint16_t frame_id, uint8_t cycle_count, uint16_
         return;
     }
 
+    uint32_t irq_state = spin_lock_blocking(injector_state_lock);
     memcpy(TEMPLATES[slot].data, captured_bytes, frame_len);
     TEMPLATES[slot].len = frame_len;
     TEMPLATES[slot].valid = 1;
+    spin_unlock(injector_state_lock, irq_state);
 }
 
 static void fix_cycle_count(uint8_t *full_frame, uint8_t cycle_count)
@@ -126,26 +132,42 @@ static void fix_cycle_count(uint8_t *full_frame, uint8_t cycle_count)
     full_frame[4] = (full_frame[4] & 0xC0u) | (cycle_count & 0x3Fu);
 }
 
-static void inject_frame(uint8_t *full_frame, uint16_t injector_payload_length, uint8_t direction)
+static bool inject_frame(const uint8_t *full_frame, uint16_t injector_payload_length, uint8_t direction)
 {
     // first word is length indicator, rest is payload
     // pio y-- need pre-sub 1 from length
+    if ((injector_payload_length == 0u) || ((injector_payload_length & 0x3u) != 0u)) {
+        return false;
+    }
+
     if (direction == INJECT_DIRECTION_TO_VEHICLE) {
-    pio_sm_put(pio_forwarder_with_injector, sm_forwarder_with_injector_to_vehicle, injector_payload_length - 1);
-    dma_channel_set_read_addr((uint)dma_inject_chan_to_vehicle, (const void *)full_frame, false);
-    dma_channel_set_trans_count((uint)dma_inject_chan_to_vehicle, injector_payload_length / 4, true);
+        if (dma_channel_is_busy((uint)dma_inject_chan_to_vehicle)) {
+            return false;
+        }
+        pio_sm_put(pio_forwarder_with_injector, sm_forwarder_with_injector_to_vehicle, injector_payload_length - 1);
+        dma_channel_set_read_addr((uint)dma_inject_chan_to_vehicle, (const void *)full_frame, false);
+        dma_channel_set_trans_count((uint)dma_inject_chan_to_vehicle, injector_payload_length / 4, true);
+        return true;
     } else if (direction == INJECT_DIRECTION_TO_ECU) {
-    pio_sm_put(pio_forwarder_with_injector, sm_forwarder_with_injector_to_ecu, injector_payload_length - 1);
-    dma_channel_set_read_addr((uint)dma_inject_chan_to_ecu, (const void *)full_frame, false);
-    dma_channel_set_trans_count((uint)dma_inject_chan_to_ecu, injector_payload_length / 4, true);
+        if (dma_channel_is_busy((uint)dma_inject_chan_to_ecu)) {
+            return false;
+        }
+        pio_sm_put(pio_forwarder_with_injector, sm_forwarder_with_injector_to_ecu, injector_payload_length - 1);
+        dma_channel_set_read_addr((uint)dma_inject_chan_to_ecu, (const void *)full_frame, false);
+        dma_channel_set_trans_count((uint)dma_inject_chan_to_ecu, injector_payload_length / 4, true);
+        return true;
     } else {
-        return;
+        return false;
     }
 }
 
 static uint8_t override_payload_bytes[MAX_FRAME_PAYLOAD_BYTES];
 void __time_critical_func(try_inject_frame)(uint16_t frame_id, uint8_t cycle_count)
 {
+    if (!injector_enabled) {
+        return;
+    }
+
     // Find any trigger where current frame is the "previous" id
     for (int i = 0; i < (int)NUM_TRIGGER_RULES; i++) {
         if (INJECT_TRIGGERS[i].trigger_id != frame_id){
@@ -160,13 +182,22 @@ void __time_critical_func(try_inject_frame)(uint16_t frame_id, uint8_t cycle_cou
             continue;
         }
 
-        frame_template_t *tpl = &TEMPLATES[target_slot];
-        if (!tpl->valid || tpl->len < 8) {
-            continue;
-        }
-
+        uint8_t *tx_frame = inject_tx_buffers[next_inject_tx_buffer];
+        uint16_t tx_frame_len = 0;
         uint16_t override_payload_len = 0;
-        bool has_data = host_override_try_pop_for(INJECT_TRIGGERS[i].target_id, cycle_count, override_payload_bytes, &override_payload_len);
+        bool has_data = false;
+
+        uint32_t irq_state = spin_lock_blocking(injector_state_lock);
+        frame_template_t *tpl = &TEMPLATES[target_slot];
+        if (tpl->valid && tpl->len >= 8) {
+            has_data = host_override_try_pop_for_locked(INJECT_TRIGGERS[i].target_id, cycle_count, override_payload_bytes, &override_payload_len);
+            if (has_data) {
+                tx_frame_len = tpl->len;
+                memcpy(tx_frame, tpl->data, tx_frame_len);
+            }
+        }
+        spin_unlock(injector_state_lock, irq_state);
+
         if (!has_data) {
             continue;
         }
@@ -175,10 +206,12 @@ void __time_critical_func(try_inject_frame)(uint16_t frame_id, uint8_t cycle_cou
             continue;
         }
 
-        memcpy(tpl->data + 5 + INJECT_TRIGGERS[i].replace_offset, override_payload_bytes, override_payload_len);
-        fix_cycle_count(tpl->data, cycle_count);
-        fix_flexray_frame_crc(tpl->data, tpl->len);
-        inject_frame(tpl->data, tpl->len, INJECT_TRIGGERS[i].direction);
+        memcpy(tx_frame + 5 + INJECT_TRIGGERS[i].replace_offset, override_payload_bytes, override_payload_len);
+        fix_cycle_count(tx_frame, cycle_count);
+        fix_flexray_frame_crc(tx_frame, tx_frame_len);
+        if (inject_frame(tx_frame, tx_frame_len, INJECT_TRIGGERS[i].direction)) {
+            next_inject_tx_buffer ^= 1u;
+        }
         break; // fire once per triggering frame
         
     }
@@ -232,13 +265,16 @@ bool injector_submit_override(uint16_t id, uint8_t base, uint16_t len, const uin
         return false;
     }
 
-    return host_override_push(
+    uint32_t irq_state = spin_lock_blocking(injector_state_lock);
+    bool queued = host_override_push_locked(
         id,
         matched_rule->cycle_mask,
         matched_rule->cycle_base,
         matched_rule->replace_len,
         bytes + 1 + matched_rule->replace_offset
     );
+    spin_unlock(injector_state_lock, irq_state);
+    return queued;
 }
 
 void injector_set_enabled(bool enabled)
@@ -256,6 +292,10 @@ void setup_forwarder_with_injector(PIO pio,
     uint rx_pin_from_vehicle, uint tx_pin_to_ecu)
 {
     pio_forwarder_with_injector = pio;
+    if (injector_state_lock == NULL) {
+        uint lock_num = spin_lock_claim_unused(true);
+        injector_state_lock = spin_lock_instance(lock_num);
+    }
     uint offset = pio_add_program(pio, &flexray_forwarder_with_injector_program);
     sm_forwarder_with_injector_to_vehicle = pio_claim_unused_sm(pio, true);
     sm_forwarder_with_injector_to_ecu = pio_claim_unused_sm(pio, true);
