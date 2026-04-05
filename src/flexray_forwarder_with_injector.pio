@@ -55,6 +55,7 @@ void flexray_forwarder_with_injector_program_init(PIO pio, uint sm, uint offset,
     // Now, let PIO take control of the pins.
     pio_gpio_init(pio, tx_pin);
     pio_gpio_init(pio, rx_pin);
+    gpio_set_drive_strength(tx_pin, GPIO_DRIVE_STRENGTH_12MA);
     gpio_pull_up(tx_pin);
     pio_sm_set_consecutive_pindirs(pio, sm, tx_pin, 1, true);
     pio_sm_set_consecutive_pindirs(pio, sm, rx_pin, 1, false);

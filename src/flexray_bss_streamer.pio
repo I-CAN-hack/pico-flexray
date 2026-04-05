@@ -84,6 +84,7 @@ frame_end:
 void flexray_bss_streamer_program_init(PIO pio, uint sm, uint offset, uint rx_pin, uint tx_en_pin) {
     // Now, let PIO take control of the pins.
     pio_gpio_init(pio, tx_en_pin);
+    gpio_set_drive_strength(tx_en_pin, GPIO_DRIVE_STRENGTH_12MA);
 
     pio_sm_set_consecutive_pindirs(pio, sm, rx_pin, 1, false);
     pio_sm_set_consecutive_pindirs(pio, sm, tx_en_pin, 1, true);
