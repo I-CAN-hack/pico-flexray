@@ -26,8 +26,8 @@ EP_VENDOR_OUT = 0x03
 EP_VENDOR_IN = 0x81
 
 EXPO = 0.4
-TORQUE_SCALE = -2.0
-TORQUE_RATE_LIMIT_PER_SEC = 1.0  # Nm/s. Set to a float to enable slew limiting.
+TORQUE_SCALE = -5.0
+TORQUE_RATE_LIMIT_PER_SEC = None  # Nm/s. Set to a float to enable slew limiting.
 READ_SIZE = 65536
 USB_READ_TIMEOUT_MS = 50
 MIN_BODY_LEN = 11
@@ -96,32 +96,28 @@ def parse_varlen_records(buffer: bytes):
     return i, frames
 
 
-def read_next_odd_cycle(
-    dev, data_buffer: bytes, target_frame_id: int, last_odd_cycle: int | None
-):
-    while True:
-        try:
-            data = dev.read(EP_VENDOR_IN, READ_SIZE, timeout=USB_READ_TIMEOUT_MS)  # type: ignore[arg-type]
-        except usb.core.USBTimeoutError:
-            return data_buffer, None
+def poll_target_cycles(dev, data_buffer: bytes, target_frame_id: int):
+    try:
+        data = dev.read(EP_VENDOR_IN, READ_SIZE, timeout=USB_READ_TIMEOUT_MS)  # type: ignore[arg-type]
+    except usb.core.USBTimeoutError:
+        return data_buffer, []
 
-        if not data:
-            return data_buffer, None
+    if not data:
+        return data_buffer, []
 
-        data_buffer += bytes(data)
-        consumed, frames = parse_varlen_records(data_buffer)
-        if consumed > 0:
-            data_buffer = data_buffer[consumed:]
+    data_buffer += bytes(data)
+    consumed, frames = parse_varlen_records(data_buffer)
+    if consumed > 0:
+        data_buffer = data_buffer[consumed:]
 
-        for frame in frames:
-            cycle_count = frame["cycle_count"]
-            if frame["frame_id"] != target_frame_id:
-                continue
-            if (cycle_count & 1) == 0:
-                continue
-            if cycle_count == last_odd_cycle:
-                continue
-            return data_buffer, cycle_count
+    cycles = [
+        frame["cycle_count"] for frame in frames if frame["frame_id"] == target_frame_id
+    ]
+    return data_buffer, cycles
+
+
+def next_even_cycle_after(cycle_count: int) -> int:
+    return (cycle_count + (2 if (cycle_count & 1) == 0 else 1)) & 0x3F
 
 
 def apply_rate_limit(
@@ -236,10 +232,14 @@ def main() -> int:
     torque_cmd = 0.0
     last_torque_cmd_update = time.monotonic()
     rx_buffer = b""
-    last_odd_cycle = None
+    last_seen_cycle = None
+    queued_even_cycle = None
     skipped_cycles = 0
+    count = 0
 
     while True:
+        if count <= 0:
+            enabled = False
         # Handle joystick
         report = gamepad.read(64)
         if report:
@@ -247,6 +247,8 @@ def main() -> int:
 
             if button and not prev_button:
                 enabled = False if enabled else True
+                if enabled:
+                    count = 30
 
             prev_button = button
 
@@ -267,8 +269,8 @@ def main() -> int:
         last_torque_cmd_update = now
 
         try:
-            rx_buffer, odd_cycle = read_next_odd_cycle(
-                dev, rx_buffer, TARGET_FRAME_ID, last_odd_cycle
+            rx_buffer, observed_cycles = poll_target_cycles(
+                dev, rx_buffer, TARGET_FRAME_ID
             )
         except usb.core.USBError as e:
             print(f"USB read failed: {e}", file=sys.stderr)
@@ -278,41 +280,80 @@ def main() -> int:
                 print("Reconnection failed. Exiting.", file=sys.stderr)
                 break
             rx_buffer = b""
-            last_odd_cycle = None
+            last_seen_cycle = None
+            queued_even_cycle = None
             continue
 
-        if odd_cycle is None:
+        if not observed_cycles:
             continue
 
-        if last_odd_cycle is not None:
-            expected_odd_cycle = (last_odd_cycle + 2) & 0x3F
-            if odd_cycle != expected_odd_cycle:
-                skipped_cycles += (((odd_cycle - last_odd_cycle) & 0x3F) // 2) - 1
-        last_odd_cycle = odd_cycle
-        inject_cycle = (odd_cycle + 1) & 0x3F
-        payload = build_frame(inject_cycle, send_count & 0xF, torque_cmd)
-        buf = build_override_payload(TARGET_FRAME_ID, 0, payload)
-        print(
-            f"Seen odd cycle {odd_cycle}, queueing even cycle {inject_cycle}: "
-            f"Skipped cycles {skipped_cycles} "
-            f"{buf.hex()} Torque cmd: {torque_cmd} "
-            f"Target torque cmd: {torque_cmd_target} Enabled: {enabled}"
-        )
+        reconnect_after_write = False
+        for observed_cycle in observed_cycles:
+            if observed_cycle == last_seen_cycle:
+                continue
 
-        if enabled:
+            if last_seen_cycle is not None:
+                expected_cycle = (last_seen_cycle + 1) & 0x3F
+                if observed_cycle != expected_cycle:
+                    missed_cycles = ((observed_cycle - last_seen_cycle) & 0x3F) - 1
+                    skipped_cycles += missed_cycles
+                    print(
+                        f"Warning: skipped cycle(s), expected cycle {expected_cycle} "
+                        f"after {last_seen_cycle}, got {observed_cycle} "
+                        f"(missed {missed_cycles} cycle(s))",
+                        file=sys.stderr,
+                    )
+
+            last_seen_cycle = observed_cycle
+
+            # 0x42 triggers before 0x44 in the schedule, so by the time we see
+            # cycle N on 0x44, any queued override for even cycle N has either
+            # fired already or been missed. Prequeue cycle N+2 on even cycles,
+            # and fall back to queueing N+1 if we only catch the odd cycle.
+            if queued_even_cycle is not None:
+                queued_cycle_delta = (observed_cycle - queued_even_cycle) & 0x3F
+                if queued_cycle_delta < 32:
+                    queued_even_cycle = None
+
+            inject_cycle = next_even_cycle_after(observed_cycle)
+            if queued_even_cycle == inject_cycle:
+                continue
+
+            payload = build_frame(inject_cycle, send_count & 0xF, torque_cmd)
+            buf = build_override_payload(TARGET_FRAME_ID, 0, payload)
+            queue_mode = (
+                "prequeueing" if (observed_cycle & 1) == 0 else "fallback queueing"
+            )
+            print(
+                f"Seen cycle {observed_cycle}, {queue_mode} even cycle {inject_cycle}: "
+                f"Skipped cycles {skipped_cycles} "
+                f"{buf.hex()} Torque cmd: {torque_cmd} "
+                f"Target torque cmd: {torque_cmd_target} Enabled: {enabled}"
+            )
+
+            if not enabled:
+                continue
+
             try:
                 dev.write(EP_VENDOR_OUT, buf, timeout=1000)
+                count -= 1
                 send_count += 1
+                queued_even_cycle = inject_cycle
             except usb.core.USBError as e:
                 print(f"USB write failed: {e}", file=sys.stderr)
-                # Try to reconnect
                 time.sleep(0.2)
                 dev = find_device()
                 if dev is None:
                     print("Reconnection failed. Exiting.", file=sys.stderr)
-                    break
+                    return 1
                 rx_buffer = b""
-                last_odd_cycle = None
+                last_seen_cycle = None
+                queued_even_cycle = None
+                reconnect_after_write = True
+                break
+
+        if reconnect_after_write:
+            continue
 
     return 0
 
