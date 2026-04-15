@@ -7,7 +7,6 @@ import time
 import hid
 import numpy as np
 from opendbc.can.packer import CANPacker
-from opendbc.can.parser import CANParser
 
 from crc8 import crc8
 
@@ -27,6 +26,10 @@ EP_VENDOR_OUT = 0x03
 EP_VENDOR_IN = 0x81
 
 EXPO = 0.4
+READ_SIZE = 65536
+USB_READ_TIMEOUT_MS = 50
+MIN_BODY_LEN = 11
+TARGET_FRAME_ID = 0x44
 
 
 def find_device():
@@ -58,6 +61,65 @@ def build_override_payload(frame_id: int, base: int, data_bytes: bytes) -> bytes
     # op 0x90: [0x90][u16 id][u8 base][u16 len][len bytes]
     header = struct.pack("<BHBH", 0x90, frame_id, base, len(data_bytes))
     return header + data_bytes
+
+
+def parse_varlen_records(buffer: bytes):
+    frames = []
+    i = 0
+    buflen = len(buffer)
+
+    while i + 2 <= buflen:
+        body_len = buffer[i] | (buffer[i + 1] << 8)
+        if body_len < MIN_BODY_LEN:
+            i += 1
+            continue
+        if i + 2 + body_len > buflen:
+            break
+
+        header = buffer[i + 3 : i + 8]
+        payload_len_words = (header[2] >> 1) & 0x7F
+        payload_bytes = payload_len_words * 2
+        if 5 + payload_bytes + 3 != body_len - 1:
+            i += 1
+            continue
+
+        frames.append(
+            {
+                "frame_id": ((header[0] & 0x07) << 8) | header[1],
+                "cycle_count": header[4] & 0x3F,
+            }
+        )
+        i += 2 + body_len
+
+    return i, frames
+
+
+def read_next_odd_cycle(
+    dev, data_buffer: bytes, target_frame_id: int, last_odd_cycle: int | None
+):
+    while True:
+        try:
+            data = dev.read(EP_VENDOR_IN, READ_SIZE, timeout=USB_READ_TIMEOUT_MS)  # type: ignore[arg-type]
+        except usb.core.USBTimeoutError:
+            return data_buffer, None
+
+        if not data:
+            return data_buffer, None
+
+        data_buffer += bytes(data)
+        consumed, frames = parse_varlen_records(data_buffer)
+        if consumed > 0:
+            data_buffer = data_buffer[consumed:]
+
+        for frame in frames:
+            cycle_count = frame["cycle_count"]
+            if frame["frame_id"] != target_frame_id:
+                continue
+            if (cycle_count & 1) == 0:
+                continue
+            if cycle_count == last_odd_cycle:
+                continue
+            return data_buffer, cycle_count
 
 
 # Initialize CANPacker with local DBC path
@@ -103,8 +165,13 @@ def pack_acc_payload(values: dict):
     return msg
 
 
-def build_frame(counter: int, torque: float) -> bytes:
-    values = {"TORQUE": torque, "COUNTER_1": counter, "COUNTER_2": counter}
+def build_frame(cycle_count: int, counter: int, torque: float) -> bytes:
+    values = {
+        "CYCLE_COUNT": cycle_count,
+        "TORQUE": torque,
+        "COUNTER_1": counter,
+        "COUNTER_2": counter,
+    }
     data = pack_acc_payload(values)[1]
 
     crc_1 = crc8(data[2:9], 0xA4)
@@ -112,6 +179,7 @@ def build_frame(counter: int, torque: float) -> bytes:
 
     # Pack again with checksum filled in
     values = {
+        "CYCLE_COUNT": cycle_count,
         "TORQUE": torque,
         "COUNTER_1": counter,
         "COUNTER_2": counter,
@@ -127,7 +195,7 @@ def build_frame(counter: int, torque: float) -> bytes:
 
 def main() -> int:
 
-    print(build_frame(0, 0.0).hex())
+    print(build_frame(0, 0, 0.0).hex())
     dev = find_device()
     if dev is None:
         print(
@@ -141,19 +209,16 @@ def main() -> int:
     gamepad.set_nonblocking(True)
 
     send_count = 0
-    sends_in_second = 0
-
-    its = 0
 
     enabled = False
     prev_button = False
 
     angle_cmd = 0
-    angle_cmd_prev = 0
+    rx_buffer = b""
+    last_odd_cycle = None
+    skipped_cycles = 0
 
     while True:
-        its += 1
-
         # Handle joystick
         report = gamepad.read(64)
         if report:
@@ -168,26 +233,44 @@ def main() -> int:
             norm = norm if abs(norm) > 0.03 else 0.0
             norm = EXPO * norm**3 + (1 - EXPO) * norm
 
-            angle_cmd = norm * -1
+            angle_cmd = norm * -2
 
-        # rate limit
-        # max_diff = 5
-        # to_send = np.clip(
-        #     angle_cmd, angle_cmd_prev - max_diff, angle_cmd_prev + max_diff
-        # )
-        # angle_cmd_prev = to_send
-        #
+        try:
+            rx_buffer, odd_cycle = read_next_odd_cycle(
+                dev, rx_buffer, TARGET_FRAME_ID, last_odd_cycle
+            )
+        except usb.core.USBError as e:
+            print(f"USB read failed: {e}", file=sys.stderr)
+            time.sleep(0.2)
+            dev = find_device()
+            if dev is None:
+                print("Reconnection failed. Exiting.", file=sys.stderr)
+                break
+            rx_buffer = b""
+            last_odd_cycle = None
+            continue
 
-        # Build ACC override payload via DBC packing slice
-        payload = build_frame(its & 0xF, angle_cmd)
-        buf = build_override_payload(0x44, 0, payload)
-        print(f"Hex: {buf.hex()} Torque: {angle_cmd} Enabled: {enabled}")
+        if odd_cycle is None:
+            continue
+
+        if last_odd_cycle is not None:
+            expected_odd_cycle = (last_odd_cycle + 2) & 0x3F
+            if odd_cycle != expected_odd_cycle:
+                skipped_cycles += (((odd_cycle - last_odd_cycle) & 0x3F) // 2) - 1
+        last_odd_cycle = odd_cycle
+        inject_cycle = (odd_cycle + 1) & 0x3F
+        payload = build_frame(inject_cycle, send_count & 0xF, angle_cmd)
+        buf = build_override_payload(TARGET_FRAME_ID, 0, payload)
+        print(
+            f"Seen odd cycle {odd_cycle}, queueing even cycle {inject_cycle}: "
+            f"Skipped cycles {skipped_cycles} "
+            f"{buf.hex()} Torque: {angle_cmd} Enabled: {enabled}"
+        )
 
         if enabled:
             try:
                 dev.write(EP_VENDOR_OUT, buf, timeout=1000)
                 send_count += 1
-                sends_in_second += 1
             except usb.core.USBError as e:
                 print(f"USB write failed: {e}", file=sys.stderr)
                 # Try to reconnect
@@ -196,9 +279,8 @@ def main() -> int:
                 if dev is None:
                     print("Reconnection failed. Exiting.", file=sys.stderr)
                     break
-
-        # pacing ~100 Hz
-        time.sleep(0.01)
+                rx_buffer = b""
+                last_odd_cycle = None
 
     return 0
 
