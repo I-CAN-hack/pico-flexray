@@ -26,6 +26,8 @@ EP_VENDOR_OUT = 0x03
 EP_VENDOR_IN = 0x81
 
 EXPO = 0.4
+TORQUE_SCALE = -2.0
+TORQUE_RATE_LIMIT_PER_SEC = 1.0  # Nm/s. Set to a float to enable slew limiting.
 READ_SIZE = 65536
 USB_READ_TIMEOUT_MS = 50
 MIN_BODY_LEN = 11
@@ -122,6 +124,23 @@ def read_next_odd_cycle(
             return data_buffer, cycle_count
 
 
+def apply_rate_limit(
+    target_value: float,
+    current_value: float,
+    last_update_time: float,
+    now: float,
+    rate_limit_per_sec: float | None,
+) -> float:
+    if rate_limit_per_sec is None:
+        return target_value
+
+    dt = max(now - last_update_time, 0.0)
+    max_delta = rate_limit_per_sec * dt
+    return float(
+        np.clip(target_value, current_value - max_delta, current_value + max_delta)
+    )
+
+
 # Initialize CANPacker with local DBC path
 _DBC_PATH = os.path.join(os.path.dirname(__file__), "..", "dbc", "bmw_sp2018.dbc")
 _PACKER = CANPacker(_DBC_PATH)
@@ -149,7 +168,7 @@ STEER_REQUEST_DEFAULTS = {
     "SET_ME_0xFF_2": 0xFF,
     "SET_ME_0xF_3": 0xF,
     "TORQUE_REQUEST_2": 2,
-    "LKA_STATE": 0x7,  # Ramp from 0-14 on engage/disengage, 5-9 otherwise
+    "LKA_STATE": 0x14,  # Ramp from 0-14 on engage/disengage, 5-9 otherwise
     "TORQUE_REQUEST_3": 1,  # Only 1 while not ramping up/down and active
 }
 
@@ -165,10 +184,10 @@ def pack_acc_payload(values: dict):
     return msg
 
 
-def build_frame(cycle_count: int, counter: int, torque: float) -> bytes:
+def build_frame(cycle_count: int, counter: int, torque_cmd: float) -> bytes:
     values = {
         "CYCLE_COUNT": cycle_count,
-        "TORQUE": torque,
+        "TORQUE": torque_cmd,
         "COUNTER_1": counter,
         "COUNTER_2": counter,
     }
@@ -180,7 +199,7 @@ def build_frame(cycle_count: int, counter: int, torque: float) -> bytes:
     # Pack again with checksum filled in
     values = {
         "CYCLE_COUNT": cycle_count,
-        "TORQUE": torque,
+        "TORQUE": torque_cmd,
         "COUNTER_1": counter,
         "COUNTER_2": counter,
         "CHECKSUM_1": crc_1,
@@ -213,7 +232,9 @@ def main() -> int:
     enabled = False
     prev_button = False
 
-    angle_cmd = 0
+    torque_cmd_target = 0.0
+    torque_cmd = 0.0
+    last_torque_cmd_update = time.monotonic()
     rx_buffer = b""
     last_odd_cycle = None
     skipped_cycles = 0
@@ -233,7 +254,17 @@ def main() -> int:
             norm = norm if abs(norm) > 0.03 else 0.0
             norm = EXPO * norm**3 + (1 - EXPO) * norm
 
-            angle_cmd = norm * -2
+            torque_cmd_target = norm * TORQUE_SCALE
+
+        now = time.monotonic()
+        torque_cmd = apply_rate_limit(
+            torque_cmd_target,
+            torque_cmd,
+            last_torque_cmd_update,
+            now,
+            TORQUE_RATE_LIMIT_PER_SEC,
+        )
+        last_torque_cmd_update = now
 
         try:
             rx_buffer, odd_cycle = read_next_odd_cycle(
@@ -259,12 +290,13 @@ def main() -> int:
                 skipped_cycles += (((odd_cycle - last_odd_cycle) & 0x3F) // 2) - 1
         last_odd_cycle = odd_cycle
         inject_cycle = (odd_cycle + 1) & 0x3F
-        payload = build_frame(inject_cycle, send_count & 0xF, angle_cmd)
+        payload = build_frame(inject_cycle, send_count & 0xF, torque_cmd)
         buf = build_override_payload(TARGET_FRAME_ID, 0, payload)
         print(
             f"Seen odd cycle {odd_cycle}, queueing even cycle {inject_cycle}: "
             f"Skipped cycles {skipped_cycles} "
-            f"{buf.hex()} Torque: {angle_cmd} Enabled: {enabled}"
+            f"{buf.hex()} Torque cmd: {torque_cmd} "
+            f"Target torque cmd: {torque_cmd_target} Enabled: {enabled}"
         )
 
         if enabled:
